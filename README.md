@@ -161,16 +161,22 @@ Each step should cut a clear bottleneck (memory transactions → stalls → occu
 
 ## 📈 Reproducing the plots
 
-* **Latency vs L** compares average time per forward across backends (`custom_cuda`, `flash`, `math`).
-* **Peak memory vs L** uses `torch.cuda.max_memory_allocated()` to show the O(L) vs O(L²) behavior.
-
-Example artifacts (your numbers will vary):
+**Artifacts included in this repo** (generated on GTX1060, your numbers may differ):
 
 ![Latency vs L](results/latency_vs_L.png)
-
 ![Memory vs L](results/memory_vs_L.png)
 
 CSV with raw data: `results/sdpa_Lsweep_B1_H1_d64_fp32.csv`.
+
+| L (seq len) | **Flash (PyTorch)** | **Math (PyTorch)** | **Custom CUDA (MVP)** |
+|:-----------:|:-------------------:|:------------------:|:---------------------:|
+| 512         | ~0.10 ms            | ~0.22–0.28 ms      | ~3–4 ms               |
+| 1024        | ~0.20 ms            | ~0.54 ms           | ~11–12 ms             |
+| 1536        | ~0.30 ms            | ~1.1 ms            | ~23–25 ms             |
+| 2048        | ~0.43–0.46 ms       | ~1.9–2.0 ms        | ~36–38 ms             |
+
+**Key observation:** the **Custom CUDA** kernel already **matches FlashAttention’s memory curve** (near-linear w.r.t L), while latency still trails cuBLAS-backed PyTorch kernels. That gap is the point of the optimization roadmap.
+
 
 ---
 
