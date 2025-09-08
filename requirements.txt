@@ -1,0 +1,4 @@
+torch
+cupy-cuda11x
+matplotlib
+pandas
