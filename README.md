@@ -37,27 +37,6 @@ This repository is intentionally small: one custom CUDA kernel, one launcher, on
 
 ---
 
-## 📈 Reproducing the plots
-
-**Artifacts included in this repo** (generated on GTX1060, your numbers may differ):
-
-<p align="center">
-  <img src="results/latency_vs_L.png" width="48%" alt="Latency vs L"/>
-  <img src="results/memory_vs_L.png" width="48%" alt="Memory vs L"/>
-</p>
-
-CSV with raw data: `results/sdpa_Lsweep_B1_H1_d64_fp32.csv`.
-
-\-----------:|:-------------------:|:------------------:|:---------------------:|
-\|  512        | \~0.10 ms            | \~0.22–0.28 ms      | \~3–4 ms               |
-\| 1024        | \~0.20 ms            | \~0.54 ms           | \~11–12 ms             |
-\| 1536        | \~0.30 ms            | \~1.1 ms            | \~23–25 ms             |
-\| 2048        | \~0.43–0.46 ms       | \~1.9–2.0 ms        | \~36–38 ms             |
-
-**Key observation:** the **Custom CUDA** kernel already **matches FlashAttention’s memory curve** (near‑linear w\.r.t L), while latency still trails cuBLAS‑backed PyTorch kernels. That gap is the point of the optimization roadmap.
-
----
-
 ## 🧠 Why this project matters (for interviews & real work)
 
 1. **Memory‑scaling demonstrated**: The MVP reproduces FlashAttention’s *core idea*—compute attention **without materializing L×L scores**.
@@ -163,8 +142,10 @@ Each step should cut a clear bottleneck (memory transactions → stalls → occu
 
 **Artifacts included in this repo** (generated on GTX1060, your numbers may differ):
 
-![Latency vs L](results/latency_vs_L.png)
-![Memory vs L](results/memory_vs_L.png)
+<p align="center">
+  <img src="results/latency_vs_L.png" width="48%" alt="Latency vs L"/>
+  <img src="results/memory_vs_L.png" width="48%" alt="Memory vs L"/>
+</p>
 
 CSV with raw data: `results/sdpa_Lsweep_B1_H1_d64_fp32.csv`.
 
