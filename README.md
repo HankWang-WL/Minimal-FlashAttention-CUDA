@@ -107,81 +107,56 @@ python -m bench.bench_l_sweep --device cuda --full
 
 ## ⚙️ Optimization plan on GTX1060 (plain, detailed)
 
-> Constraints: Pascal (GTX1060) has no `cp.async`; reduced precision (FP16/BF16) is not used here. Expect **no gain** from shared‑mem double‑buffering without async copies.
+> Constraints: Pascal (GTX1060) has no `cp.async`; FP16/BF16 is not used. Double buffering is not expected to help here.
 
-### O1 — Practical wins you should do now
+### ✅ O1 — Must-Do Improvements
 
-1. **Float4 vectorized loads/stores for K/V**
-   **What**: read/write 4 floats at a time (`float4`).
-   **Why**: fewer memory transactions → higher effective bandwidth; better L2/TEX utilization.
-   **How**:
+1. **Vectorized Memory Access (`float4`)**
 
-   * Preconditions: `d_head % 4 == 0` (true for 64) and pointers are 16‑byte aligned.
-   * Load: `const float4* K4 = reinterpret_cast<const float4*>(K + base);` then index by `d/4`.
-   * Option A: keep `float4` in registers and multiply per lane; Option B: unpack to 4 scalars after load.
-     **Gotchas**: handle tail only if `D` not divisible by 4 (not needed for 64).
+   * **What:** Load and store 4 floats at a time.
+   * **Why:** Reduces global memory transactions → faster memory throughput.
+   * **How:** Ensure `D % 4 == 0` (true for 64) and pointers are 16-byte aligned, then reinterpret pointers as `float4*`.
 
-2. **Per‑lane register caching of Q channels (`d0`, `d1`)**
-   **What**: each lane loads its two Q elements **once** and reuses across all `t` in the tile.
-   **Why**: avoids reloading `Qrow[d0]`/`Qrow[d1]` for every K row; reduces L1 pressure.
-   **How**: hoist outside the inner `t` loop:
+2. **Per-Lane Q Register Caching**
 
-   ```cpp
-   const int d0 = lane, d1 = lane + 32;
-   const float q0 = (d0 < D) ? Qrow[d0] : 0.f;
-   const float q1 = (d1 < D) ? Qrow[d1] : 0.f;
-   // use q0/q1 inside all dot products
-   ```
+   * **What:** Each thread loads its `Q` values once and reuses them.
+   * **Why:** Avoids repeatedly loading from global memory, reducing memory pressure.
+   * **How:** Pre-load `q0`, `q1` before the inner loop and use them inside dot product computation.
 
-3. **Keep `grid.x = 1`; tune `BLOCK_N` for shared‑mem limit/occupancy**
-   **What**: the kernel already loops over K/V tiles; multiple blocks in `x` would duplicate work.
-   **Why**: simpler scheduling; avoids redundant tile loads.
-   **How (BLOCK\_N)**: on Pascal 48KB SMEM/block is common. With padding, bytes per tile ≈
-   `bytes = 4 * [ BLOCK_N*(BLOCK_D+1)   // K                + BLOCK_N*(BLOCK_D+1) // V                + 2*BLOCK_N ]         // scores0/1`
-   For `D=64` ⇒ `BLOCK_D=64`, a good default is **BLOCK\_N=32** (often higher occupancy than 64).
+3. **Tune `BLOCK_N` for Shared Memory Usage**
 
-4. **Single final store of `Out`**
-   **What**: keep accumulators (`acc0`, `acc1`) in registers; rescale when `(m,l)` updates; write once at the end.
-   **Why**: removes per‑tile global writes; cuts DRAM traffic.
-   **How**: this is already how the code works—keep it that way when refactoring.
+   * **What:** Choose a block size that balances occupancy and shared memory usage.
+   * **Why:** Too large a tile can reduce occupancy; too small wastes bandwidth.
+   * **How:** For Pascal, `BLOCK_N = 32` is a good starting point.
 
-5. **Coalesced & aligned accesses**
-   **What**: ensure `Q/K/V/Out` are contiguous and aligned.
-   **Why**: to let `float4` vectorization actually coalesce.
-   **How**: keep tensors contiguous on host (`contiguous()`), align base pointers (16B), and index rows as `[row*D + d]`.
+4. **Single Final Write to Output**
 
-6. **(Optional) Register blocking (2×2)**
-   **What**: have each lane produce >1 output channel beyond `d0,d1` (e.g., also `d0+64`, `d1+64` if you split D).
-   **Why**: increase math per byte if registers allow.
-   **How**: add extra `acc*` registers and update them in the same loop body; watch register pressure.
+   * **What:** Keep accumulation (`acc0`, `acc1`) in registers until the end.
+   * **Why:** Avoids repeated global writes → faster.
 
-### O2 — Next gains to try (Pascal‑friendly)
+5. **Memory Alignment & Coalescing**
 
-1. **Keep short‑tile scores in registers**
-   **What**: when `tile_len ≤ 32`, store per‑lane scores in registers instead of shared memory.
-   **Why**: removes shared‑mem traffic and syncs for score reads.
-   **How**: use a small per‑lane array (e.g., `float s_local[32];`) and warp‑reduce to get `tile_max`/`sum`. Ensure no register spill.
+   * **What:** Ensure `Q/K/V` tensors are contiguous and aligned.
+   * **Why:** Maximizes benefit from `float4` vectorization.
 
-2. **Unroll inner loops and leverage FMA**
-   **What**: unroll the `d` loop (e.g., ×4/×8) so the compiler fuses multiply‑add.
-   **Why**: better ILP and scheduling on Pascal cores.
-   **How**: `#pragma unroll` with care; check SASS and profiler for spills.
+---
 
-3. **Pointer alignment & strict coalescing**
-   **What**: make sure K/V row starts are 16B‑aligned; avoid strided or misaligned segments.
-   **Why**: sustains throughput after switching to `float4`.
+### 🚀 O2 — Optional Next Steps
 
-4. **Register pressure control**
-   **What**: prevent spills when adding vectorization/unrolling.
-   **How**: trim temporaries; consider `__launch_bounds__(64)`; verify occupancy vs. registers in Nsight Compute.
+1. **Short-Tile Score in Registers**
 
-5. **Split‑D for `D>64`**
-   **What**: process D in 64‑wide chunks while maintaining the same `(m,l)` per row.
-   **Why**: generalizes beyond 64‑dim heads without changing the core loop.
+   * **What:** Keep scores in registers when tile size ≤ 32.
+   * **Why:** Reduces shared-mem traffic and sync overhead.
 
-6. **Bank‑conflict audit after vectorization**
-   **What**: confirm `+1` padding still eliminates conflicts with your new access pattern.
-   **How**: verify stall reasons in Nsight Compute (shared‑mem bank conflict counters).
+2. **Unroll Inner Loops / FMA**
+
+   * **What:** Unroll the dot-product loop to allow compiler to fuse operations.
+   * **Why:** Improves instruction-level parallelism.
+
+3. **Split D for Larger Models**
+
+   * **What:** Process `D` in 64-wide chunks.
+   * **Why:** Allows the kernel to support larger head dimensions without major redesign.
 
 
 ---
